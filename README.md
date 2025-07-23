@@ -1,235 +1,193 @@
+Of course. This is a common and useful task: creating a simplified "index" or "lookup" file from a more complex dataset.
+
+Based on your request, it seems the ibov.csv file is not actually needed for this specific goal, because the necessary information (the company ticker and the date of the event) should both be present in your cvm_data.sqlite file.
+
+The plan is to:
+
+Load the data directly from your cvm_data.sqlite file.
+
+Identify the specific columns that contain the company ticker and the event date.
+
+Extract only these two columns into a new DataFrame.
+
+Clean and format the data (ensure dates are correct, remove duplicates).
+
+Save this new, lightweight DataFrame to a Parquet file.
+
+This approach is more efficient as it avoids loading the large ibov.csv file unnecessarily.
+
+Expected Folder Structure
+
+The script assumes your project is set up like this:
+
+Generated code
+your_project/
+├── data/
+│   └── processed/
+│       └── cvm_data.sqlite  <-- The only input file we need
+│
+├── output/                  <-- The script will create this folder
+│
+└── scripts/
+    └── 02_create_ticker_date_index.py <-- Place the Python code here
+
+Python Script: 02_create_ticker_date_index.py
+
+This script is designed to be easily configurable. You can adjust the column names in the "Configuration" section to match your exact file schema.
+
+Generated python
+# -*- coding: utf-8 -*-
+
 # ==============================================================================
-# 1. IMPORTAÇÕES E CONFIGURAÇÕES INICIAIS
+# Step 0: Import Libraries
 # ==============================================================================
-# Comentário: Importamos as bibliotecas necessárias.
-# tensorflow e keras para construir a rede neural.
-# pandas para manipulação de dados e numpy para operações numéricas.
-# sklearn para pré-processamento e métricas.
-# matplotlib para visualização e os para manipulação de arquivos.
-import tensorflow as tf
 import pandas as pd
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error
-
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import LSTM, Dense, Dropout, InputLayer
-from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l2
-
-import matplotlib.pyplot as plt
+import sqlite3
+from pathlib import Path
 import os
-import warnings
 
-# Suprime avisos de formatação do TensorFlow para um output mais limpo
-warnings.filterwarnings("ignore", category=UserWarning)
-tf.get_logger().setLevel('ERROR')
+print("Starting script to create a ticker-date index file...")
+
+# ==============================================================================
+# Step 1: Configuration
+# ==============================================================================
+# --- Define the Project Root Path ---
+ROOT_PATH = Path(__file__).resolve().parent.parent
+
+# --- Define Paths for Input and Output ---
+DATA_PATH = ROOT_PATH / 'data' / 'processed'
+OUTPUT_PATH = ROOT_PATH / 'output'
+
+# Ensure the output directory exists
+os.makedirs(OUTPUT_PATH, exist_ok=True)
+
+# --- Input File ---
+CVM_SQLITE_FILE = DATA_PATH / 'cvm_data.sqlite'
+
+# --- Output File ---
+# Parquet is recommended for efficiency and type preservation
+OUTPUT_FILE = OUTPUT_PATH / 'company_event_dates.parquet' 
+
+# --- Column Names (IMPORTANT: ADJUST THESE TO MATCH YOUR SQLITE TABLE) ---
+# The name of the column in your SQLite table that contains the company ticker
+# This might be 'ticker', 'CD_CVM', 'DENOM_CIA', etc.
+CVM_TICKER_COL = 'CD_CVM' 
+# The name of the column in your SQLite table that contains the event date
+CVM_DATE_COL = 'DT_COMPTC'
+
+# --- Desired Column Names in the Output File ---
+OUTPUT_TICKER_COL = 'ticker'
+OUTPUT_DATE_COL = 'date'
 
 
 # ==============================================================================
-# 2. FUNÇÕES AUXILIARES (DADOS, PREPARAÇÃO, MODELO)
+# Step 2: Load Required Data from SQLite
 # ==============================================================================
+try:
+    print(f"Connecting to database: {CVM_SQLITE_FILE}")
+    conn = sqlite3.connect(CVM_SQLITE_FILE)
 
-def gerar_dados_empresa(ticker, n_releases=80):
-    """
-    Comentário: Gera um DataFrame de dados simulados para uma empresa. No mundo real,
-    você substituiria esta função por uma que carrega seus dados processados.
-    """
-    np.random.seed(hash(ticker) % (2**32 - 1))
-    dates = pd.to_datetime(pd.date_range(start='2005-01-01', periods=n_releases, freq='Q'))
-    sentimento = np.random.uniform(-1, 1, n_releases)
-    pib_variacao = np.random.uniform(-0.01, 0.03, n_releases) + np.sin(np.arange(n_releases) / 10) * 0.01
-    taxa_juros = np.random.uniform(0.02, 0.14, n_releases)
-    receita_esperada = np.linspace(1000, 5000, n_releases) * (1 + np.random.uniform(-0.05, 0.05, n_releases))
-    receita_realizada = receita_esperada * (1 + np.random.normal(0, 0.1, n_releases))
-    choque_receita = (receita_realizada - receita_esperada) / receita_esperada
-    retorno_acao = (sentimento * 0.2 + choque_receita * 0.5 - taxa_juros * 0.1 + np.random.normal(0, 0.05, n_releases))
-    df = pd.DataFrame({
-        'Data': dates, 'Sentimento_Release': sentimento, 'PIB_Variacao': pib_variacao,
-        'Taxa_Juros': taxa_juros, 'Choque_Receita': choque_receita,
-        'Retorno_Acao_Dia_Seguinte': retorno_acao
-    })
-    df.set_index('Data', inplace=True)
-    return df
+    # Automatically find the first table name in the database
+    table_name_query = "SELECT name FROM sqlite_master WHERE type='table';"
+    table_name = pd.read_sql_query(table_name_query, conn).iloc[0, 0]
+    
+    print(f"Reading columns '{CVM_TICKER_COL}' and '{CVM_DATE_COL}' from table '{table_name}'...")
+    
+    # Efficiently select only the columns we need
+    query = f'SELECT "{CVM_TICKER_COL}", "{CVM_DATE_COL}" FROM {table_name}'
+    
+    df = pd.read_sql_query(query, conn)
+    
+    conn.close()
 
-def df_to_X_y(df, window_size=4):
-    """
-    Comentário: Converte um DataFrame em janelas de sequências (X) e o valor alvo (y).
-    Esta é a estrutura de dados que a LSTM espera.
-    """
-    df_as_np = df.to_numpy()
-    X, y = [], []
-    for i in range(len(df_as_np) - window_size):
-        X.append(df_as_np[i:i + window_size])
-        y.append(df_as_np[i + window_size][-1]) # O alvo é a última coluna do passo seguinte
-    return np.array(X), np.array(y)
+except sqlite3.Error as e:
+    print(f"\n❌ SQL ERROR: Could not read the database. Error: {e}")
+    exit()
+except FileNotFoundError:
+    print(f"\n❌ FILE NOT FOUND: The database file was not found at {CVM_SQLITE_FILE}")
+    exit()
+except Exception as e:
+    print(f"\n❌ An unexpected error occurred during data loading: {e}")
+    exit()
 
-def construir_modelo_lstm(window_size, n_features):
-    """
-    Comentário: Constrói a arquitetura do modelo LSTM.
-    Inclui Dropout e Regularização L2 para combater o overfitting.
-    """
-    model = Sequential([
-        InputLayer((window_size, n_features)),
-        LSTM(64, kernel_regularizer=l2(0.01)),
-        Dropout(0.2),
-        Dense(8, activation='relu'),
-        Dense(1, activation='linear')
-    ])
-    return model
+print(f"Successfully loaded {df.shape[0]} rows.")
 
 # ==============================================================================
-# 3. FUNÇÃO PRINCIPAL DE ANÁLISE
+# Step 3: Process and Clean the Extracted Data
 # ==============================================================================
-def analisar_empresa(ticker):
-    """
-    Função principal que executa todo o pipeline:
-    1. Carrega e prepara os dados.
-    2. Busca pela melhor janela temporal.
-    3. Treina o modelo final com a melhor janela.
-    4. Gera e exibe as previsões como um range.
-    """
-    print(f"===========================================================")
-    print(f"=== INICIANDO ANÁLISE COMPLETA PARA A EMPRESA: {ticker} ===")
-    print(f"===========================================================")
+if not df.empty:
+    print("\nProcessing data...")
 
-    # ETAPA 1: CARREGAR E PREPARAR OS DADOS
-    # --------------------------------------------------------------------------
-    print("\n--- ETAPA 1: Carregando e Normalizando os Dados ---")
-    df_bruto = gerar_dados_empresa(ticker)
-    features = ['Sentimento_Release', 'PIB_Variacao', 'Taxa_Juros', 'Choque_Receita', 'Retorno_Acao_Dia_Seguinte']
-    df_proc = df_bruto[features]
+    # --- Rename columns to the desired output names ---
+    df.rename(columns={
+        CVM_TICKER_COL: OUTPUT_TICKER_COL,
+        CVM_DATE_COL: OUTPUT_DATE_COL
+    }, inplace=True)
+    print(f"Renamed columns to '{OUTPUT_TICKER_COL}' and '{OUTPUT_DATE_COL}'.")
 
-    # Normalizar os dados para o intervalo [0, 1]
-    scaler = MinMaxScaler()
-    df_norm = pd.DataFrame(scaler.fit_transform(df_proc), columns=features, index=df_proc.index)
+    # --- Clean the data ---
+    # Drop rows where either ticker or date is missing
+    original_rows = len(df)
+    df.dropna(subset=[OUTPUT_TICKER_COL, OUTPUT_DATE_COL], inplace=True)
+    print(f"Dropped {original_rows - len(df)} rows with missing data.")
     
-    # Guardar o scaler da variável alvo para reverter a transformação depois
-    target_col_index = features.index('Retorno_Acao_Dia_Seguinte')
-    scaler_y = MinMaxScaler()
-    scaler_y.min_, scaler_y.scale_ = scaler.min_[target_col_index], scaler.scale_[target_col_index]
-    print("Dados normalizados com sucesso.")
+    # Convert date column to datetime objects
+    df[OUTPUT_DATE_COL] = pd.to_datetime(df[OUTPUT_DATE_COL], errors='coerce')
+    df.dropna(subset=[OUTPUT_DATE_COL], inplace=True) # Drop rows where date conversion failed
+    print("Standardized date column to datetime format.")
 
-    # ETAPA 2: BUSCA PELA JANELA TEMPORAL IDEAL
-    # --------------------------------------------------------------------------
-    print("\n--- ETAPA 2: Buscando a Janela Temporal Ideal ---")
-    window_candidates = [2, 3, 4, 6, 8, 12]
-    results = {}
+    # Remove any fully duplicate rows
+    original_rows = len(df)
+    df.drop_duplicates(inplace=True)
+    print(f"Dropped {original_rows - len(df)} duplicate rows.")
 
-    for w in window_candidates:
-        print(f"Testando janela de tamanho: {w}...", end="")
-        X, y = df_to_X_y(df_norm, window_size=w)
-        
-        if len(X) < 30:
-            print(" Dataset muito pequeno, pulando.")
-            continue
-            
-        n = len(X)
-        X_train, y_train = X[:int(n*0.7)], y[:int(n*0.7)]
-        X_val, y_val = X[int(n*0.7):], y[int(n*0.7):] # Usaremos o resto para validação nesta busca
+    # ==============================================================================
+    # Step 4: Sort the Final DataFrame
+    # ==============================================================================
+    print("Sorting data by ticker and date...")
+    df.sort_values(by=[OUTPUT_TICKER_COL, OUTPUT_DATE_COL], ascending=[True, True], inplace=True)
 
-        model_temp = construir_modelo_lstm(w, len(features))
-        model_temp.compile(loss='mse', optimizer=Adam(learning_rate=0.001))
-        
-        # Treina silenciosamente com early stopping para ser rápido
-        model_temp.fit(X_train, y_train, validation_data=(X_val, y_val),
-                       epochs=50, verbose=0, callbacks=[EarlyStopping(monitor='val_loss', patience=5)])
-        
-        val_loss = model_temp.evaluate(X_val, y_val, verbose=0)
-        results[w] = val_loss
-        print(f" Erro de Validação (MSE): {val_loss:.5f}")
+    # ==============================================================================
+    # Step 5: Save the Final DataFrame
+    # ==============================================================================
+    try:
+        df.to_parquet(OUTPUT_FILE, index=False)
+        print(f"\n✅ Success! The index file has been saved to:\n{OUTPUT_FILE}")
+        print("\nFinal data preview:")
+        print(df.head())
 
-    best_window = min(results, key=results.get)
-    print(f"\n>>> Janela ideal encontrada: {best_window} trimestres (menor erro de validação).")
+    except Exception as e:
+        print(f"\n❌ ERROR: Could not save the Parquet file. Reason: {e}")
 
-    # ETAPA 3: TREINAMENTO DO MODELO FINAL
-    # --------------------------------------------------------------------------
-    print("\n--- ETAPA 3: Treinando o Modelo Final com a Melhor Janela ---")
-    X, y = df_to_X_y(df_norm, window_size=best_window)
-    n = len(X)
-    X_train, y_train = X[:int(n*0.7)], y[:int(n*0.7)]
-    X_val, y_val = X[int(n*0.7):int(n*0.85)], y[int(n*0.7):int(n*0.85)]
-    X_test, y_test = X[int(n*0.85):], y[int(n*0.85):]
-    
-    model_final = construir_modelo_lstm(best_window, len(features))
-    model_final.compile(loss='mse', optimizer=Adam(learning_rate=0.001), metrics=['mean_absolute_error'])
+else:
+    print("\n⚠️ The loaded DataFrame is empty. No output file was created.")
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+How to Use
 
-    # Callbacks para o treino final
-    checkpoint_path = 'best_model.keras'
-    cp = ModelCheckpoint(checkpoint_path, save_best_only=True, monitor='val_loss', mode='min', verbose=0)
-    es = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
+Configure: The most important step is to open the script and edit the variables in "Step 1: Configuration". Make sure CVM_TICKER_COL and CVM_DATE_COL exactly match the column names in your cvm_data.sqlite table.
 
-    model_final.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=100, callbacks=[cp, es], verbose=1)
+Save: Save the code as 02_create_ticker_date_index.py inside your scripts/ folder.
 
-    # Carrega o melhor modelo salvo pelo checkpoint
-    best_model = load_model(checkpoint_path)
-    print("Modelo final treinado e melhor versão carregada.")
+Run from Terminal:
 
-    # ETAPA 4: CÁLCULO DA INCERTEZA DO MODELO
-    # --------------------------------------------------------------------------
-    print("\n--- ETAPA 4: Calculando a Incerteza do Modelo (Volatilidade dos Erros) ---")
-    val_preds_scaled = best_model.predict(X_val)
-    val_preds = scaler_y.inverse_transform(val_preds_scaled)
-    y_val_original = scaler_y.inverse_transform(y_val.reshape(-1, 1))
+Navigate to your project's root directory (your_project/).
 
-    erros_de_validacao = y_val_original - val_preds
-    volatilidade_dos_erros = np.std(erros_de_validacao)
-    print(f"Desvio padrão dos erros de validação: {volatilidade_dos_erros:.4f}")
+Activate your Python virtual environment (e.g., source .venv/bin/activate).
 
-    # ETAPA 5: GERAÇÃO DO RANGE DE PREVISÃO
-    # --------------------------------------------------------------------------
-    print("\n--- ETAPA 5: Gerando Previsões com Range para o Conjunto de Teste ---")
-    test_preds_scaled = best_model.predict(X_test)
-    
-    # Desnormaliza a previsão central
-    predicoes_centrais = scaler_y.inverse_transform(test_preds_scaled)
-    y_test_original = scaler_y.inverse_transform(y_test.reshape(-1, 1))
+Execute the script:
 
-    # Calcula o intervalo de confiança (95% -> fator 1.96)
-    fator_confianca = 1.96
-    margem_de_erro = fator_confianca * volatilidade_dos_erros
-    limite_inferior = predicoes_centrais - margem_de_erro
-    limite_superior = predicoes_centrais + margem_de_erro
+Generated bash
+python scripts/02_create_ticker_date_index.py
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Bash
+IGNORE_WHEN_COPYING_END
 
-    # ETAPA 6: OUTPUT E VISUALIZAÇÃO
-    # --------------------------------------------------------------------------
-    print("\n--- ETAPA 6: Resultados Finais ---")
-    
-    # Visualização
-    plt.figure(figsize=(15, 7))
-    plt.title(f'Previsão com Range de Confiança (95%) para {ticker}')
-    plt.plot(y_test_original, label='Valores Reais', color='blue', marker='o', linestyle='None', zorder=5)
-    plt.plot(predicoes_centrais, label='Previsão Central', color='red', linestyle='--', zorder=4)
-    plt.fill_between(range(len(predicoes_centrais)),
-                     limite_inferior.flatten(),
-                     limite_superior.flatten(),
-                     color='red', alpha=0.2, label='Range de Previsão')
-    plt.xlabel('Release (no conjunto de teste)')
-    plt.ylabel('Retorno da Ação')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    # Output da previsão para o próximo período (usando o primeiro ponto do teste como exemplo)
-    print("\n>>> PREVISÃO PARA O PRÓXIMO RELEASE <<<")
-    print(f"Com base nos dados mais recentes, o modelo prevê que o retorno da ação terá:")
-    print(f"  - Previsão Central (Mais Provável): {predicoes_centrais[0][0]:.4f}")
-    print(f"  - Range Esperado (com 95% de confiança): de {limite_inferior[0][0]:.4f} a {limite_superior[0][0]:.4f}")
-
-    # Limpa o arquivo do modelo salvo
-    if os.path.exists(checkpoint_path):
-        os.remove(checkpoint_path)
-    
-    print(f"\nAnálise para {ticker} concluída.")
-
-
-# ==============================================================================
-# --- PONTO DE ENTRADA DO SCRIPT ---
-# ==============================================================================
-if __name__ == '__main__':
-    # Para analisar uma empresa, basta chamar a função com o ticker desejado.
-    analisar_empresa(ticker='PETROBRAS_PN')
-    
-    # Você pode descomentar a linha abaixo para rodar a análise para outra empresa
-    # analisar_empresa(ticker='VALE_ON')
+After running, the output folder will contain the file company_event_dates.parquet. This file will have just two columns, ticker and date, and will be clean, sorted, and ready for use in your projects.
