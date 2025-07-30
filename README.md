@@ -1,142 +1,168 @@
-Com certeza! Vamos criar um código que busca o Fato Relevante mais recente da WEGE3 na CVM e baixa o PDF correspondente.
-Para isso, utilizaremos a biblioteca brfinance, que se mostra uma das mais adequadas para interagir com os dados da CVM no Python.
-Passo a passo:
- * Instalar as bibliotecas: Se você ainda não as tem, instale brfinance e requests.
-   pip install brfinance requests pandas
+Sim, é totalmente possível e, na verdade, é o método mais recomendado e confiável fazer a busca diretamente no site da CVM (Comissão de Valores Mobiliários).
 
- * Obter o código CVM da WEGE3: Precisamos do código CVM da WEGE3 para fazer a busca. Embora possamos buscar por "WEGE3", é mais robusto usar o código CVM diretamente. A brfinance oferece um método para mapear o código CVM a partir do nome da empresa.
- * Definir a categoria "Fato Relevante": Identificar a categoria correta para "Fato Relevante" nos dados da CVM.
- * Buscar o Fato Relevante mais recente: Fazer uma busca reversa por data para obter o mais recente.
- * Extrair o link do PDF: Dos resultados da busca, extrair o URL do documento.
- * Baixar o PDF: Usar a biblioteca requests para fazer o download do PDF.
-<!-- end list -->
+Utilizar a CVM como fonte primária oferece vantagens significativas sobre o scraping de sites de Relações com Investidores (RI) individuais:
+
+Centralização: Todos os documentos oficiais de todas as companhias abertas estão em um único lugar.
+
+Padronização: O formato de entrega e a nomenclatura dos documentos (ITR, DFP, etc.) são padronizados pela CVM.
+
+Confiabilidade: É a fonte oficial. A informação é disponibilizada na CVM no momento em que se torna pública para todo o mercado.
+
+Disponibilidade: O site da CVM é historicamente mais estável e menos propenso a mudanças de layout que quebrariam um script de scraping.
+
+O Desafio: Interagindo com o Portal Empresas.NET
+
+O sistema da CVM para consulta de documentos é o Empresas.NET. Diferente de um site estático, a consulta de documentos nele é feita através do preenchimento de um formulário e envio dos dados para o servidor (uma requisição do tipo POST).
+
+Para automatizar esse processo, nosso script precisa simular o preenchimento e envio deste formulário. O resultado da busca nos dará um link para o download do documento, que geralmente vem em um arquivo .zip.
+
+Código Python para Baixar Releases da CVM
+
+O script a seguir implementa a lógica para buscar e baixar o último release trimestral (ITR - Informações Trimestrais) de uma empresa diretamente do portal Empresas.NET.
+
+Generated python
 import requests
-import pandas as pd
-from brfinance import CVMAsyncBackend
-from datetime import date, timedelta
+from bs4 import BeautifulSoup
 import os
-import asyncio
+from datetime import date
+import re
+from zipfile import ZipFile
+from io import BytesIO
 
-# Função assíncrona para buscar e baixar o PDF
-async def download_latest_wege3_press_release():
-    print("Iniciando a busca pelo Fato Relevante mais recente da WEGE3...")
+def baixar_ultimo_release_cvm(nome_empresa):
+    """
+    Busca e baixa o último documento ITR (release trimestral) de uma empresa
+    diretamente do sistema Empresas.NET da CVM.
+    """
+    print(f"Iniciando busca na CVM para: '{nome_empresa}'")
+
+    # URL do formulário de consulta de documentos periódicos da CVM
+    url_consulta = "http://sistemas.cvm.gov.br/consultadocumentos/FormularioConsultaDocumentos.aspx"
     
-    cvm_httpclient = CVMAsyncBackend()
+    # URL base para visualizar o documento encontrado
+    url_download_base = "http://sistemas.cvm.gov.br/consultadocumentos/"
 
+    # Usamos uma sessão para manter o estado da navegação (importante para sites com formulários)
+    session = requests.Session()
+    
+    # Primeiro, acessamos a página para obter os dados necessários para o formulário (viewstate, etc.)
     try:
-        # 1. Obter o código CVM da WEGE3
-        # Os códigos CVM são um dicionário onde a chave é o código CVM e o valor é o nome da empresa
-        cvm_codes = await cvm_httpclient.get_cvm_codes()
-        
-        wege3_cvm_code = None
-        for code, company_name in cvm_codes.items():
-            if "WEG S.A." in company_name.upper(): # O nome oficial pode ser "WEG S.A."
-                wege3_cvm_code = code
-                break
-        
-        if not wege3_cvm_code:
-            print("Erro: Não foi possível encontrar o código CVM para WEG S.A. (WEGE3).")
-            print("Verifique se o nome da empresa está correto ou ajuste a busca.")
+        response_form = session.get(url_consulta)
+        response_form.raise_for_status()
+        soup_form = BeautifulSoup(response_form.text, 'html.parser')
+
+        # Extraímos os campos ocultos necessários para a requisição POST
+        viewstate = soup_form.find('input', {'name': '__VIEWSTATE'})['value']
+        viewstategenerator = soup_form.find('input', {'name': '__VIEWSTATEGENERATOR'})['value']
+        eventvalidation = soup_form.find('input', {'name': '__EVENTVALIDATION'})['value']
+
+    except requests.exceptions.RequestException as e:
+        print(f"Erro ao acessar o formulário da CVM: {e}")
+        return
+    except (TypeError, KeyError):
+        print("Não foi possível encontrar os campos de formulário necessários. O site da CVM pode ter mudado.")
+        return
+
+    # Dados do formulário (payload) que vamos enviar via POST
+    # Simulamos o preenchimento do nome da empresa e a busca por ITR
+    payload = {
+        '__EVENTTARGET': '',
+        '__EVENTARGUMENT': '',
+        '__LASTFOCUS': '',
+        '__VIEWSTATE': viewstate,
+        '__VIEWSTATEGENERATOR': viewstategenerator,
+        '__EVENTVALIDATION': eventvalidation,
+        'txtEmpresa': nome_empresa,
+        'chkTrabalho': 'on', # Importante para buscar os documentos
+        'radDocumento': '1', # 1 = Todos, 2 = Último dia, 3 = Últimos 7 dias
+        'cmbCategoria': '1', # 1 = ITR
+        'cmbAno': '-1', # -1 = Todos os anos
+        'btnConsultar': 'Consultar'
+    }
+
+    print("Enviando consulta de documentos para a CVM...")
+    try:
+        response_result = session.post(url_consulta, data=payload)
+        response_result.raise_for_status()
+        soup_result = BeautifulSoup(response_result.text, 'html.parser')
+
+        # Procuramos a tabela de resultados
+        tabela_resultados = soup_result.find('table', {'class': 'Resultado'})
+
+        if not tabela_resultados:
+            print(f"Nenhum documento ITR encontrado para '{nome_empresa}' com os critérios fornecidos.")
             return
 
-        print(f"Código CVM da WEGE3 (WEG S.A.) encontrado: {wege3_cvm_code}")
+        # Pegamos a primeira linha da tabela (o resultado mais recente)
+        primeiro_resultado = tabela_resultados.find('tr', {'class': 'GridRow_Alternating'})
+        if not primeiro_resultado:
+             primeiro_resultado = tabela_resultados.find('tr', {'class': 'GridRow'})
+        
+        if not primeiro_resultado:
+             print("Não foi possível encontrar a linha de resultado na tabela.")
+             return
 
-        # 2. Obter as categorias de documentos e encontrar "Fato Relevante"
-        categories = await cvm_httpclient.get_consulta_externa_cvm_categories()
-        fato_relevante_category_code = None
-        for code, name in categories.items():
-            if "fato relevante" in name.lower():
-                fato_relevante_category_code = code
-                break
-
-        if not fato_relevante_category_code:
-            print("Erro: Não foi possível encontrar a categoria 'Fato Relevante'.")
-            print("Verifique as categorias disponíveis na documentação da CVM ou da brfinance.")
+        # O link está dentro de uma função JavaScript no atributo 'onclick'
+        onclick_attr = primeiro_resultado.find('a')['onclick']
+        
+        # Usamos regex para extrair o número do documento (ID) da função JS
+        match = re.search(r"VisualizarDocumento\('(\d+)'\)", onclick_attr)
+        if not match:
+            print("Não foi possível extrair o ID do documento do link.")
             return
 
-        print(f"Código da categoria 'Fato Relevante' encontrado: {fato_relevante_category_code}")
+        id_documento = match.group(1)
+        print(f"Documento mais recente encontrado. ID: {id_documento}")
 
-        # 3. Definir o período de busca (últimos 365 dias, por exemplo, para garantir o mais recente)
-        # É bom ter uma janela ampla e depois ordenar para pegar o mais recente.
-        end_date = date.today()
-        start_date = end_date - timedelta(days=365 * 2) # Buscar nos últimos 2 anos para ter certeza de pegar o mais recente
+        # Construímos a URL final para download
+        url_download_doc = f"{url_download_base}VisualizarDocumento.aspx?id={id_documento}"
+
+        print(f"Baixando arquivo de: {url_download_doc}")
+        response_doc = session.get(url_download_doc)
+        response_doc.raise_for_status()
         
-        print(f"Buscando Fatos Relevantes para WEGE3 entre {start_date} e {end_date}...")
+        # O arquivo da CVM é um ZIP. Precisamos extrair o PDF de dentro dele.
+        with ZipFile(BytesIO(response_doc.content)) as z:
+            # Procura pelo arquivo PDF dentro do ZIP
+            pdf_file_name = next((name for name in z.namelist() if name.lower().endswith('.pdf')), None)
+            
+            if pdf_file_name:
+                z.extract(pdf_file_name, path=".") # Extrai o PDF para a pasta atual
+                print(f"\nSucesso! Release '{pdf_file_name}' baixado e extraído.")
+            else:
+                print("Arquivo ZIP baixado, mas nenhum PDF foi encontrado dentro dele.")
 
-        search_results = await cvm_httpclient.get_consulta_externa_cvm_results(
-            start_date=start_date,
-            end_date=end_date,
-            cvm_codes=[wege3_cvm_code],
-            category=[fato_relevante_category_code]
-        )
-
-        if search_results.empty:
-            print("Nenhum Fato Relevante encontrado para WEGE3 no período especificado.")
-            return
-
-        # 4. Encontrar o Fato Relevante mais recente
-        # A coluna 'data_referencia' geralmente contém a data do documento.
-        # Ordenar por data em ordem decrescente para pegar o mais recente.
-        latest_press_release = search_results.sort_values(by='data_referencia', ascending=False).iloc[0]
-
-        link_documento = latest_press_release['link_documento']
-        assunto = latest_press_release['assunto']
-        data_referencia = latest_press_release['data_referencia'].strftime('%Y-%m-%d')
-        
-        print(f"\nFato Relevante mais recente encontrado:")
-        print(f"  Data: {data_referencia}")
-        print(f"  Assunto: {assunto}")
-        print(f"  Link: {link_documento}")
-
-        # 5. Baixar o PDF
-        if link_documento and link_documento.endswith('.pdf'):
-            try:
-                # Cria um nome de arquivo seguro e descritivo
-                # Remove caracteres inválidos para nome de arquivo
-                safe_assunto = "".join([c for c in assunto if c.isalnum() or c in (' ', '.', '_')]).strip()
-                safe_assunto = safe_assunto.replace(' ', '_')
-                filename = f"WEGE3_FatoRelevante_{data_referencia}_{safe_assunto}.pdf"
-                
-                print(f"Tentando baixar o PDF para: {filename}")
-
-                response = requests.get(link_documento, stream=True)
-                response.raise_for_status() # Lança um erro para status de erro HTTP
-
-                with open(filename, 'wb') as pdf_file:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        pdf_file.write(chunk)
-                
-                print(f"PDF baixado com sucesso: {filename}")
-            except requests.exceptions.RequestException as e:
-                print(f"Erro ao baixar o PDF do link {link_documento}: {e}")
-            except Exception as e:
-                print(f"Erro ao salvar o PDF: {e}")
-        else:
-            print(f"O documento não é um PDF ou o link não foi encontrado/termina em .pdf: {link_documento}")
-
+    except requests.exceptions.RequestException as e:
+        print(f"Erro durante a consulta ou download do documento: {e}")
     except Exception as e:
-        print(f"Ocorreu um erro: {e}")
-        print("Certifique-se de que o acesso à internet está funcionando e que as bibliotecas estão atualizadas.")
+        print(f"Ocorreu um erro inesperado: {e}")
 
-# Para executar a função assíncrona
-if __name__ == "__main__":
-    asyncio.run(download_latest_wege3_press_release())
+if __name__ == '__main__':
+    # IMPORTANTE: Use o nome da empresa como cadastrado na CVM.
+    # Evite usar o ticker (ex: WEGE3). Use o nome completo ou uma parte clara dele.
+    nome_da_empresa = "WEG S.A."
+    # nome_da_empresa = "PETROLEO BRASILEIRO S.A. PETROBRAS"
+    # nome_da_empresa = "VALE S.A."
+    
+    baixar_ultimo_release_cvm(nome_da_empresa)
 
-Como usar o código:
- * Salve o código: Salve o código acima em um arquivo Python (por exemplo, download_wege3.py).
- * Execute no terminal: Abra seu terminal ou prompt de comando e navegue até o diretório onde você salvou o arquivo. Em seguida, execute:
-   python download_wege3.py
+Como Usar e Principais Pontos de Atenção
 
-O que o código faz:
- * Importações: Importa as bibliotecas necessárias (requests para download, pandas para manipulação de dados, brfinance para acesso à CVM, datetime para datas, os para caminhos de arquivos e asyncio para funções assíncronas).
- * download_latest_wege3_press_release() (função assíncrona):
-   * Instancia CVMAsyncBackend(): Cria um cliente para interagir com a API da CVM.
-   * Busca o código CVM da WEG S.A.: Itera sobre os códigos CVM para encontrar o da WEG S.A. (que corresponde à WEGE3).
-   * Identifica a categoria "Fato Relevante": Procura a categoria de documento que corresponde a "Fato Relevante".
-   * Define o período de busca: Busca documentos dos últimos 2 anos para garantir que o mais recente seja encontrado.
-   * Consulta à CVM: Usa get_consulta_externa_cvm_results para buscar os Fatos Relevantes da WEGE3 no período.
-   * Encontra o mais recente: Ordena os resultados pela coluna data_referencia em ordem decrescente e pega o primeiro item, que será o mais recente.
-   * Extrai informações: Obtém o link_documento, assunto e data_referencia do Fato Relevante mais recente.
-   * Baixa o PDF: Se o link_documento existir e terminar em .pdf, ele usa requests para baixar o arquivo e salvá-lo com um nome descritivo (WEGE3_FatoRelevante_DATA_ASSUNTO.pdf) no mesmo diretório do script.
- * Execução Assíncrona: O bloco if __name__ == "__main__": garante que a função assíncrona seja executada corretamente.
-Este script é uma solução robusta para o seu objetivo!
+Instale as Bibliotecas: Se ainda não as tiver, instale as dependências.
+
+Generated bash
+pip install requests beautifulsoup4
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Bash
+IGNORE_WHEN_COPYING_END
+
+Nome da Empresa: O campo de busca da CVM funciona melhor com o nome oficial da empresa (razão social) e não com o código de negociação (ticker). Para usar o script, altere a variável nome_da_empresa para o nome da companhia desejada.
+
+Tipo de Documento: Este código está configurado para buscar "ITR - Informações Trimestrais" ('cmbCategoria': '1'). Se você quiser outros documentos, como as "DFP - Demonstrações Financeiras Padronizadas" (anuais), você precisaria inspecionar o código-fonte da página da CVM para encontrar o valor correto para a categoria e ajustar o payload.
+
+Arquivo .zip: Este é um ponto crucial. O sistema da CVM agrupa todos os arquivos de um comunicado (o release em PDF, as demonstrações financeiras em planilhas, etc.) em um único arquivo .zip. O código já está preparado para baixar este zip, encontrar o arquivo PDF dentro dele e extraí-lo para a mesma pasta onde o script está sendo executado.
+
+Este método é, sem dúvida, a abordagem mais profissional e robusta para a automação da coleta de dados financeiros no mercado brasileiro.
