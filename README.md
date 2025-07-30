@@ -1,168 +1,143 @@
-Sim, é totalmente possível e, na verdade, é o método mais recomendado e confiável fazer a busca diretamente no site da CVM (Comissão de Valores Mobiliários).
-
-Utilizar a CVM como fonte primária oferece vantagens significativas sobre o scraping de sites de Relações com Investidores (RI) individuais:
-
-Centralização: Todos os documentos oficiais de todas as companhias abertas estão em um único lugar.
-
-Padronização: O formato de entrega e a nomenclatura dos documentos (ITR, DFP, etc.) são padronizados pela CVM.
-
-Confiabilidade: É a fonte oficial. A informação é disponibilizada na CVM no momento em que se torna pública para todo o mercado.
-
-Disponibilidade: O site da CVM é historicamente mais estável e menos propenso a mudanças de layout que quebrariam um script de scraping.
-
-O Desafio: Interagindo com o Portal Empresas.NET
-
-O sistema da CVM para consulta de documentos é o Empresas.NET. Diferente de um site estático, a consulta de documentos nele é feita através do preenchimento de um formulário e envio dos dados para o servidor (uma requisição do tipo POST).
-
-Para automatizar esse processo, nosso script precisa simular o preenchimento e envio deste formulário. O resultado da busca nos dará um link para o download do documento, que geralmente vem em um arquivo .zip.
-
-Código Python para Baixar Releases da CVM
-
-O script a seguir implementa a lógica para buscar e baixar o último release trimestral (ITR - Informações Trimestrais) de uma empresa diretamente do portal Empresas.NET.
-
-Generated python
 import requests
 from bs4 import BeautifulSoup
 import os
-from datetime import date
 import re
 from zipfile import ZipFile
 from io import BytesIO
+from datetime import datetime
 
-def baixar_ultimo_release_cvm(nome_empresa):
+def baixar_ultimo_release_rad_cvm(nome_empresa):
     """
     Busca e baixa o último documento ITR (release trimestral) de uma empresa
-    diretamente do sistema Empresas.NET da CVM.
+    diretamente do novo portal RAD da CVM.
     """
-    print(f"Iniciando busca na CVM para: '{nome_empresa}'")
+    print(f"Iniciando busca no portal RAD da CVM para: '{nome_empresa}'")
 
-    # URL do formulário de consulta de documentos periódicos da CVM
-    url_consulta = "http://sistemas.cvm.gov.br/consultadocumentos/FormularioConsultaDocumentos.aspx"
-    
-    # URL base para visualizar o documento encontrado
-    url_download_base = "http://sistemas.cvm.gov.br/consultadocumentos/"
+    url_rad = "https://www.rad.cvm.gov.br/ENET/frmConsultaExternaCVM.aspx"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
 
-    # Usamos uma sessão para manter o estado da navegação (importante para sites com formulários)
     session = requests.Session()
-    
-    # Primeiro, acessamos a página para obter os dados necessários para o formulário (viewstate, etc.)
+    session.headers.update(headers)
+
     try:
-        response_form = session.get(url_consulta)
+        # 1. Acessar a página para obter os dados do formulário
+        print("Acessando formulário de consulta...")
+        response_form = session.get(url_rad)
         response_form.raise_for_status()
         soup_form = BeautifulSoup(response_form.text, 'html.parser')
 
-        # Extraímos os campos ocultos necessários para a requisição POST
         viewstate = soup_form.find('input', {'name': '__VIEWSTATE'})['value']
         viewstategenerator = soup_form.find('input', {'name': '__VIEWSTATEGENERATOR'})['value']
         eventvalidation = soup_form.find('input', {'name': '__EVENTVALIDATION'})['value']
 
-    except requests.exceptions.RequestException as e:
-        print(f"Erro ao acessar o formulário da CVM: {e}")
-        return
-    except (TypeError, KeyError):
-        print("Não foi possível encontrar os campos de formulário necessários. O site da CVM pode ter mudado.")
-        return
+        # 2. Enviar a requisição POST para buscar os documentos
+        # Primeiro, buscamos pelo nome da empresa para obter seu Código CVM
+        payload_busca_empresa = {
+            '__EVENTTARGET': 'txtNomeEmpresa',
+            '__EVENTARGUMENT': '',
+            '__LASTFOCUS': '',
+            '__VIEWSTATE': viewstate,
+            '__VIEWSTATEGENERATOR': viewstategenerator,
+            '__EVENTVALIDATION': eventvalidation,
+            'txtChave': '',
+            'txtNomeEmpresa': nome_empresa,
+            'txtCNPJ': '',
+            'txtAssunto': '',
+            'txtDataIni': '',
+            'txtDataFim': '',
+            'hdnCodCVM': '',
+        }
 
-    # Dados do formulário (payload) que vamos enviar via POST
-    # Simulamos o preenchimento do nome da empresa e a busca por ITR
-    payload = {
-        '__EVENTTARGET': '',
-        '__EVENTARGUMENT': '',
-        '__LASTFOCUS': '',
-        '__VIEWSTATE': viewstate,
-        '__VIEWSTATEGENERATOR': viewstategenerator,
-        '__EVENTVALIDATION': eventvalidation,
-        'txtEmpresa': nome_empresa,
-        'chkTrabalho': 'on', # Importante para buscar os documentos
-        'radDocumento': '1', # 1 = Todos, 2 = Último dia, 3 = Últimos 7 dias
-        'cmbCategoria': '1', # 1 = ITR
-        'cmbAno': '-1', # -1 = Todos os anos
-        'btnConsultar': 'Consultar'
-    }
+        print(f"Buscando código CVM para '{nome_empresa}'...")
+        response_busca = session.post(url_rad, data=payload_busca_empresa)
+        response_busca.raise_for_status()
+        soup_busca = BeautifulSoup(response_busca.text, 'html.parser')
 
-    print("Enviando consulta de documentos para a CVM...")
-    try:
-        response_result = session.post(url_consulta, data=payload)
-        response_result.raise_for_status()
-        soup_result = BeautifulSoup(response_result.text, 'html.parser')
-
-        # Procuramos a tabela de resultados
-        tabela_resultados = soup_result.find('table', {'class': 'Resultado'})
-
-        if not tabela_resultados:
-            print(f"Nenhum documento ITR encontrado para '{nome_empresa}' com os critérios fornecidos.")
+        cod_cvm_input = soup_busca.find('input', {'id': 'hdnCodCVM'})
+        if not cod_cvm_input or not cod_cvm_input.get('value'):
+            print(f"Não foi possível encontrar o Código CVM para '{nome_empresa}'. Tente o nome exato.")
             return
 
-        # Pegamos a primeira linha da tabela (o resultado mais recente)
-        primeiro_resultado = tabela_resultados.find('tr', {'class': 'GridRow_Alternating'})
-        if not primeiro_resultado:
-             primeiro_resultado = tabela_resultados.find('tr', {'class': 'GridRow'})
+        cod_cvm = cod_cvm_input['value']
+        print(f"Código CVM encontrado: {cod_cvm}")
+
+        # 3. Agora, fazemos a busca final pelos documentos ITR
+        # Atualizamos o payload com o código CVM e os filtros corretos
+        viewstate = soup_busca.find('input', {'name': '__VIEWSTATE'})['value']
+        eventvalidation = soup_busca.find('input', {'name': '__EVENTVALIDATION'})['value']
         
-        if not primeiro_resultado:
-             print("Não foi possível encontrar a linha de resultado na tabela.")
+        payload_consulta_docs = {
+            '__EVENTTARGET': '',
+            '__EVENTARGUMENT': '',
+            '__LASTFOCUS': '',
+            '__VIEWSTATE': viewstate,
+            '__VIEWSTATEGENERATOR': viewstategenerator,
+            '__EVENTVALIDATION': eventvalidation,
+            'txtChave': '',
+            'txtNomeEmpresa': nome_empresa,
+            'txtCNPJ': '',
+            'txtAssunto': 'itr',  # Filtra por ITR
+            'txtDataIni': '01/01/2020', # Data inicial para garantir que pegamos os mais recentes
+            'txtDataFim': datetime.now().strftime('%d/%m/%Y'),
+            'hdnCodCVM': cod_cvm,
+            'btnConsulta': 'btConsultar',
+        }
+
+        print("Consultando documentos ITR...")
+        response_docs = session.post(url_rad, data=payload_consulta_docs)
+        response_docs.raise_for_status()
+        soup_docs = BeautifulSoup(response_docs.text, 'html.parser')
+
+        # 4. Processar a tabela de resultados
+        grid_docs = soup_docs.find('table', {'id': 'grdDocumentos'})
+        if not grid_docs or not grid_docs.find('a', {'id': re.compile(r'hypDownload')}):
+            print(f"Nenhum documento do tipo ITR encontrado para '{nome_empresa}' no portal RAD.")
+            return
+
+        # O primeiro link de download na tabela é o mais recente
+        link_download = grid_docs.find('a', {'id': re.compile(r'hypDownload')})
+        if not link_download:
+             print("Não foi possível encontrar o link para download na tabela de resultados.")
              return
 
-        # O link está dentro de uma função JavaScript no atributo 'onclick'
-        onclick_attr = primeiro_resultado.find('a')['onclick']
-        
-        # Usamos regex para extrair o número do documento (ID) da função JS
-        match = re.search(r"VisualizarDocumento\('(\d+)'\)", onclick_attr)
-        if not match:
-            print("Não foi possível extrair o ID do documento do link.")
-            return
+        # O link está no atributo 'href'
+        url_arquivo = f"https://www.rad.cvm.gov.br/ENET/{link_download['href']}"
+        print(f"Link de download encontrado: {url_arquivo}")
 
-        id_documento = match.group(1)
-        print(f"Documento mais recente encontrado. ID: {id_documento}")
+        # 5. Baixar e extrair o arquivo
+        response_arquivo = session.get(url_arquivo)
+        response_arquivo.raise_for_status()
 
-        # Construímos a URL final para download
-        url_download_doc = f"{url_download_base}VisualizarDocumento.aspx?id={id_documento}"
-
-        print(f"Baixando arquivo de: {url_download_doc}")
-        response_doc = session.get(url_download_doc)
-        response_doc.raise_for_status()
-        
-        # O arquivo da CVM é um ZIP. Precisamos extrair o PDF de dentro dele.
-        with ZipFile(BytesIO(response_doc.content)) as z:
-            # Procura pelo arquivo PDF dentro do ZIP
-            pdf_file_name = next((name for name in z.namelist() if name.lower().endswith('.pdf')), None)
+        # O arquivo da CVM é um ZIP
+        with ZipFile(BytesIO(response_arquivo.content)) as z:
+            pdf_file_name = next((name for name in z.namelist() if "itr" in name.lower() and name.lower().endswith('.pdf')), None)
             
+            if not pdf_file_name: # Plano B: pega qualquer PDF se o específico não for encontrado
+                pdf_file_name = next((name for name in z.namelist() if name.lower().endswith('.pdf')), None)
+
             if pdf_file_name:
-                z.extract(pdf_file_name, path=".") # Extrai o PDF para a pasta atual
-                print(f"\nSucesso! Release '{pdf_file_name}' baixado e extraído.")
+                nome_final_arquivo = f"{nome_empresa.replace(' ', '_')}_{pdf_file_name}"
+                z.extract(pdf_file_name, path=".")
+                # Renomeia o arquivo para incluir o nome da empresa
+                os.rename(pdf_file_name, nome_final_arquivo)
+                print(f"\nSucesso! Release '{nome_final_arquivo}' baixado e extraído.")
             else:
                 print("Arquivo ZIP baixado, mas nenhum PDF foi encontrado dentro dele.")
 
     except requests.exceptions.RequestException as e:
-        print(f"Erro durante a consulta ou download do documento: {e}")
+        print(f"Erro de conexão: {e}")
+    except (TypeError, KeyError) as e:
+        print(f"Erro ao processar a página (parsing). O layout do site da CVM pode ter mudado. Detalhes: {e}")
     except Exception as e:
         print(f"Ocorreu um erro inesperado: {e}")
 
 if __name__ == '__main__':
-    # IMPORTANTE: Use o nome da empresa como cadastrado na CVM.
-    # Evite usar o ticker (ex: WEGE3). Use o nome completo ou uma parte clara dele.
-    nome_da_empresa = "WEG S.A."
-    # nome_da_empresa = "PETROLEO BRASILEIRO S.A. PETROBRAS"
-    # nome_da_empresa = "VALE S.A."
-    
-    baixar_ultimo_release_cvm(nome_da_empresa)
+    # Use o nome da empresa como cadastrado na CVM.
+    # Ex: "WEG", "PETROBRAS", "VALE", "ITAÚ UNIBANCO"
+    nome_da_empresa = "WEG"  # Tente usar um nome mais simples primeiro
+    # nome_da_empresa = "PETROLEO BRASILEIRO S A PETROBRAS"
+    # nome_da_empresa = "VALE"
 
-Como Usar e Principais Pontos de Atenção
-
-Instale as Bibliotecas: Se ainda não as tiver, instale as dependências.
-
-Generated bash
-pip install requests beautifulsoup4
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Bash
-IGNORE_WHEN_COPYING_END
-
-Nome da Empresa: O campo de busca da CVM funciona melhor com o nome oficial da empresa (razão social) e não com o código de negociação (ticker). Para usar o script, altere a variável nome_da_empresa para o nome da companhia desejada.
-
-Tipo de Documento: Este código está configurado para buscar "ITR - Informações Trimestrais" ('cmbCategoria': '1'). Se você quiser outros documentos, como as "DFP - Demonstrações Financeiras Padronizadas" (anuais), você precisaria inspecionar o código-fonte da página da CVM para encontrar o valor correto para a categoria e ajustar o payload.
-
-Arquivo .zip: Este é um ponto crucial. O sistema da CVM agrupa todos os arquivos de um comunicado (o release em PDF, as demonstrações financeiras em planilhas, etc.) em um único arquivo .zip. O código já está preparado para baixar este zip, encontrar o arquivo PDF dentro dele e extraí-lo para a mesma pasta onde o script está sendo executado.
-
-Este método é, sem dúvida, a abordagem mais profissional e robusta para a automação da coleta de dados financeiros no mercado brasileiro.
+    baixar_ultimo_release_rad_cvm(nome_da_empresa)
