@@ -1,92 +1,70 @@
-pip install investpy pandas pyarrow```
-
-Now, you can use the following Python code:
-
-```python
+from datetime import datetime, timedelta
 import pandas as pd
-import investpy
+import requests
+import os
+from io import StringIO
 
-def get_financial_data(ticker, country='brazil'):
-    """
-    Retrieves fundamental financial data for a given company.
+def update_anbima_data_filtered(file_path="renda_fixa.csv"):
 
-    Args:
-        ticker (str): The company's ticker symbol (e.g., 'WEGE3').
-        country (str): The country where the company is listed.
+    # Define URL com a data de ONTEM no formato YYMMDD
+    yesterday = datetime.now() - timedelta(days=1) # Subtrai um dia para obter a data de ontem
+    date_str = yesterday.strftime("%y%m%d") # Formato YYMMDD
+    url = f"https://www.anbima.com.br/informacoes/merc-sec/arqs/ms{date_str}.txt"
 
-    Returns:
-        pandas.DataFrame: A DataFrame containing the financial data,
-                          or None if the data cannot be retrieved.
-    """
+    print(f"Tentando baixar dados de: {url}")
+
+    # 2. Baixa os dados da URL
     try:
-        print(f"Fetching financial data for {ticker} in {country}...")
-        # Fetch income statement and balance sheet data
-        income_statement = investpy.get_stock_financial_summary(
-            stock=ticker,
-            country=country,
-            summary_type='income_statement',
-            period='annual'
+        response = requests.get(url)
+        response.raise_for_status()  # Levanta uma exceção para erros HTTP (4xx ou 5xx)
+        data = response.text
+
+        print("Dados baixados com sucesso.")
+
+    except requests.exceptions.RequestException as e:
+        print(f"Erro ao baixar os dados da ANBIMA para {yesterday.strftime('%Y-%m-%d')}: {e}")
+        return
+
+    # 2. Formata dados em uma planilha pandas
+    try:
+        df = pd.read_csv(StringIO(data),
+                sep='@',
+                encoding='latin1',
+                skiprows=1,
+                usecols=['Titulo',
+                'Data Referencia',
+                'Codigo SELIC',
+                'Data Base/Emissao',
+                'Data Vencimento',
+                'Tx. Compra',
+                'Tx. Venda',
+                'Tx. Indicativas',
+                'PU',
+                'Desvio padrao',
+                'Interv. Ind. Inf. (D0)',
+                'Interv. Ind. Sup. (D0)',
+                'Interv. Ind. Inf. (D+1)',
+                'Interv. Ind. Sup. (D+1)'
+                ]
         )
-
-        balance_sheet = investpy.get_stock_financial_summary(
-            stock=ticker,
-            country=country,
-            summary_type='balance_sheet',
-            period='annual'
-        )
-
-        # Extract relevant data
-        total_revenue = income_statement.loc[income_statement['Metric'] == 'Total Revenue'].iloc[:, 1:]
-        ebitda = income_statement.loc[income_statement['Metric'] == 'EBITDA'].iloc[:, 1:]
-        net_income = income_statement.loc[income_statement['Metric'] == 'Net Income'].iloc[:, 1:]
-        total_assets = balance_sheet.loc[balance_sheet['Metric'] == 'Total Assets'].iloc[:, 1:]
-        total_liabilities = balance_sheet.loc[balance_sheet['Metric'] == 'Total Liabilities'].iloc[:, 1:]
-
-        # Create a new DataFrame for the selected metrics
-        financial_data = pd.concat([total_revenue, ebitda, net_income, total_assets, total_liabilities])
-        financial_data.index = ['Total Revenue', 'EBITDA', 'Net Income', 'Total Assets', 'Total Liabilities']
-
-        # Convert data to numeric, coercing errors to NaN
-        for col in financial_data.columns:
-            financial_data[col] = pd.to_numeric(financial_data[col], errors='coerce')
-
-        # Calculate margins and other indicators
-        financial_data.loc['EBITDA Margin (%)'] = (financial_data.loc['EBITDA'] / financial_data.loc['Total Revenue']) * 100
-        financial_data.loc['Net Margin (%)'] = (financial_data.loc['Net Income'] / financial_data.loc['Total Revenue']) * 100
-        financial_data.loc['Debt to Assets'] = financial_data.loc['Total Liabilities'] / financial_data.loc['Total Assets']
-
-
-        return financial_data.transpose()
 
     except Exception as e:
-        print(f"An error occurred: {e}")
-        return None
+        print(f"Erro ao parsear os dados para o DataFrame pandas: {e}")
+        print("Amostra dos dados brutos (primeiros 500 caracteres):")
+        print(data[:500])
+        print("Por favor, verifique o formato do arquivo da ANBIMA e ajuste a lógica de parsing se necessário.")
+        return
 
-def save_to_parquet(data, filename="financial_data.parquet"):
-    """
-    Saves a Pandas DataFrame to a Parquet file.
 
-    Args:
-        data (pandas.DataFrame): The DataFrame to save.
-        filename (str): The name of the output Parquet file.
-    """
-    if data is not None and not data.empty:
-        try:
-            data.to_parquet(filename) # Use pandas.DataFrame.to_parquet to save the data. [1, 2, 3, 4, 5]
-            print(f"Data successfully saved to {filename}")
-        except Exception as e:
-            print(f"Could not save data to Parquet file: {e}")
+    if not os.path.exists(file_path):
+        # Primeira vez, inclui cabeçalhos
+        df.to_csv(file_path, index=False, header=True, encoding='utf-8')
+        print(f"Novo arquivo CSV '{file_path}' criado com cabeçalhos.")
     else:
-        print("No data to save.")
+        # Próximas vezes, anexa sem cabeçalhos
+        df.to_csv(file_path, index=False, header=False, mode='a', encoding='utf-8')
+        print(f"Dados anexados a '{file_path}' sem cabeçalhos.")
 
-if __name__ == '__main__':
-    # Get user input for company ticker and filename
-    company_ticker = input("Enter the company ticker (e.g., WEGE3): ")
-    output_filename = input("Enter the desired output filename (without extension): ")
-
-    # Get the financial data
-    data = get_financial_data(company_ticker)
-
-    # Save the data to a .parquet file
-    if data is not None:
-        save_to_parquet(data, f"{output_filename}.parquet")
+# Exemplo de uso:
+if __name__ == "__main__":
+    update_anbima_data_filtered()
